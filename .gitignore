@@ -1,0 +1,24 @@
+# Build output
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# Local test environment state
+/testenv/storage/
+*.qcow2
+*.iso
+*.img
+
+# Captures and logs may contain credentials or host details
+*.pcap
+*.pcapng
+*.keylog
+*.log
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
