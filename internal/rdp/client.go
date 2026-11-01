@@ -29,6 +29,9 @@ type Config struct {
 	ClientName string
 	// Console requests the console (administrative) session.
 	Console bool
+	// Headless asks the server to stop sending display updates once the
+	// session is active, for clients that do not render.
+	Headless bool
 	// TLS is the TLS configuration; ServerName is set from Addr if empty.
 	TLS *tls.Config
 	// Logf, if set, receives protocol trace messages.
@@ -53,6 +56,10 @@ type Conn struct {
 	ServerVersion uint32
 
 	lastErrorInfo uint32
+	width, height int
+
+	fpFrag  []byte   // fast-path fragment reassembly
+	pending []Bitmap // decoded fast-path bitmaps not yet returned by Next
 }
 
 func (c *Conn) logf(format string, args ...any) {
@@ -247,6 +254,12 @@ func (c *Conn) readX224() ([]byte, error) {
 			return nil, err
 		}
 		if f.fastPath {
+			if err := c.handleFastPath(f); err != nil {
+				return nil, err
+			}
+			if len(c.pending) > 0 {
+				return nil, nil // let Next deliver the bitmaps
+			}
 			continue
 		}
 		if len(f.body) < 3 || f.body[1] != 0xF0 {
@@ -264,10 +277,14 @@ func (c *Conn) sendIO(data []byte) error {
 var ErrDisconnected = errors.New("rdp: server disconnected")
 
 // readIO returns the next Send Data Indication payload on the I/O channel,
-// skipping fast-path output and data on other channels.
+// skipping data on other channels. It returns nil data with a nil error when
+// fast-path output has queued bitmaps for Next.
 func (c *Conn) readIO() ([]byte, error) {
 	for {
 		p, err := c.readX224()
+		if p == nil && err == nil {
+			return nil, nil
+		}
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				return nil, c.disconnectError()
@@ -312,17 +329,31 @@ func (c *Conn) sendData(pduType2 uint8, body []byte) error {
 
 // Event is something the session reported while running.
 type Event struct {
-	Activated  bool        // capability exchange and finalization completed
+	// Activated is set when capability exchange and finalization complete
+	// (also after a server-initiated reactivation, e.g. a desktop resize).
+	// Width and Height give the session's desktop size.
+	Activated     bool
+	Width, Height int
+
 	LoggedOn   *LogonInfo  // the user session logon completed
 	LogonError *LogonError // a logon error or warning
+	Bitmaps    []Bitmap    // screen updates to draw
 }
 
 // Next processes server PDUs until something of interest happens.
 func (c *Conn) Next() (Event, error) {
 	for {
+		if len(c.pending) > 0 {
+			ev := Event{Bitmaps: c.pending}
+			c.pending = nil
+			return ev, nil
+		}
 		data, err := c.readIO()
 		if err != nil {
 			return Event{}, err
+		}
+		if data == nil {
+			continue
 		}
 		r := newR(data)
 		total := r.u16()
@@ -375,6 +406,7 @@ func (c *Conn) activate(r *rbuf) error {
 		width, height, bpp = sc.width, sc.height, sc.bpp
 	}
 	c.logf("share: session %dx%d at %d bpp", width, height, bpp)
+	c.width, c.height = int(width), int(height)
 
 	if err := c.sendIO(confirmActivePDU(c.shareID, c.userID, width, height, bpp)); err != nil {
 		return err
@@ -415,12 +447,32 @@ func (c *Conn) handleData(r *rbuf) (Event, bool, error) {
 
 	switch pduType2 {
 	case pduType2FontMap:
-		// Last PDU of connection finalization; stop display updates.
-		if err := c.sendData(pduType2SuppressOutput, suppressOutputBody()); err != nil {
-			return Event{}, false, err
+		// Last PDU of connection finalization.
+		if c.cfg.Headless {
+			if err := c.sendData(pduType2SuppressOutput, suppressOutputBody()); err != nil {
+				return Event{}, false, err
+			}
+		} else {
+			if err := c.sendData(pduType2SuppressOutput, allowOutputBody(c.width, c.height)); err != nil {
+				return Event{}, false, err
+			}
+			if err := c.sendData(pduType2RefreshRect, refreshRectBody(c.width, c.height)); err != nil {
+				return Event{}, false, err
+			}
+			if err := c.sendData(pduType2Input, inputSyncBody()); err != nil {
+				return Event{}, false, err
+			}
 		}
 		c.logf("share: connection finalized")
-		return Event{Activated: true}, true, nil
+		return Event{Activated: true, Width: c.width, Height: c.height}, true, nil
+	case pduType2Update:
+		bitmaps, err := c.parseUpdate(body)
+		if err != nil {
+			return Event{}, false, err
+		}
+		if len(bitmaps) > 0 {
+			return Event{Bitmaps: bitmaps}, true, nil
+		}
 	case pduType2SaveSessionInfo:
 		info, loggedOn, logonErr := parseSaveSessionInfo(body)
 		if logonErr != nil {

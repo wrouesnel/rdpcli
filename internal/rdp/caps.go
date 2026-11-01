@@ -46,7 +46,7 @@ func clientCapabilities(width, height, bpp uint16) [][]byte {
 		w.u16(0x0200) // protocolVersion
 		w.u16(0)      // pad
 		w.u16(0)      // generalCompressionTypes
-		w.u16(0x0404) // extraFlags: LONG_CREDENTIALS_SUPPORTED | NO_BITMAP_COMPRESSION_HDR
+		w.u16(0x0405) // extraFlags: FASTPATH_OUTPUT_SUPPORTED | LONG_CREDENTIALS_SUPPORTED | NO_BITMAP_COMPRESSION_HDR
 		w.u16(0)      // updateCapabilityFlag
 		w.u16(0)      // remoteUnshareFlag
 		w.u16(0)      // generalCompressionLevel
@@ -187,6 +187,13 @@ func parseServerCaps(r *rbuf, n uint16) serverCaps {
 			name = fmt.Sprintf("type%d", typ)
 		}
 		sc.names = append(sc.names, fmt.Sprintf("%s(%d)", name, l))
+		if typ == capGeneral {
+			body.skip(10)
+			extra := body.u16()
+			body.skip(6)
+			refresh, suppress := body.u8(), body.u8()
+			sc.names[len(sc.names)-1] += fmt.Sprintf("[extraFlags=0x%04x refreshRect=%d suppressOutput=%d]", extra, refresh, suppress)
+		}
 		if typ == capBitmap {
 			sc.bpp = body.u16()
 			body.skip(6)

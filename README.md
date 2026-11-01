@@ -5,8 +5,9 @@ The goal is to give command-line access to Windows hosts that only have RDP
 enabled (no WinRM/SSH), using a normal authenticated RDP session and its
 standard virtual channels. It is also a vehicle for exploring the protocol.
 
-Status: early. `rdpcli connect` establishes an authenticated, activated RDP
-session and waits for the user logon; there is no remote functionality yet.
+Status: early. rdpcli can log on to an RDP session, save a screenshot of the
+desktop, and show the desktop live in a local browser page (view only: no
+keyboard or mouse input yet).
 
 ## Build
 
@@ -21,7 +22,18 @@ CGO_ENABLED=0 go build -o bin/rdpcli ./cmd/rdpcli
 # (--password-stdin) or a terminal prompt; never from the command line.
 rdpcli connect rdp.example.com -u 'EXAMPLE\alice' --tls-sha256 <fingerprint>
 rdpcli connect 127.0.0.1 -u rdpadmin --password-stdin --tls-insecure --hold 30s -v
+
+# Save the desktop as a PNG once it has finished drawing
+rdpcli screenshot rdp.example.com -u alice -o desktop.png --tls-sha256 <fingerprint>
+
+# Live view in a browser: prints a http://127.0.0.1:PORT/<token>/ URL to open
+rdpcli view rdp.example.com -u alice --tls-sha256 <fingerprint>
 ```
+
+The viewer listens on 127.0.0.1 only (change with `--listen`), and its URL
+contains a random token so other local users cannot guess it. It is a plain
+stdlib web page fed by Server-Sent Events, which keeps the binary static; a
+native GUI toolkit would need cgo.
 
 Server certificates are verified against the system roots by default. Most RDP
 hosts use self-signed certificates, so pin one with `--tls-sha256` (the
@@ -36,8 +48,10 @@ fingerprint is printed on connect) or skip verification with `--tls-insecure`.
 | CredSSP (NLA) with NTLMv2 | MS-CSSP, MS-NLMP | TSRequest v6 with nonce binding; NTLM tested against MS-NLMP 4.2.4 vectors |
 | MCS / GCC connect, attach, channel join | T.125, T.124, MS-RDPBCGR 2.2.1.3–8 | no virtual channels yet |
 | Client Info, licensing | MS-RDPBCGR 2.2.1.11–12 | only "valid client" licensing (no RDS CAL flow) |
-| Capability exchange, finalization | MS-RDPBCGR 2.2.1.13–22 | renders nothing; asks the server to suppress output |
+| Capability exchange, finalization | MS-RDPBCGR 2.2.1.13–22 | bitmap updates only (no drawing orders); `connect` asks the server to suppress output |
 | Save Session Info (logon notification) | MS-RDPBCGR 2.2.10.1 | |
+| Fast-path output, bitmap updates | MS-RDPBCGR 2.2.9.1.2 | with fragment reassembly; no bulk compression, no pointer shapes yet |
+| Interleaved RLE bitmap codec | MS-RDPBCGR 2.2.9.1.1.3.1.2.4 | 15/16/24 bpp; the session runs at 16 bpp |
 
 ## Protocol notes
 
@@ -50,6 +64,10 @@ fingerprint is printed on connect) or skip verification with `--tls-insecure`.
   disconnect (MCS Disconnect Provider Ultimatum + TLS close_notify, then
   waiting for the server to close) does not prevent it, so `connect` retries
   that case.
+- **Screen updates need fast-path:** Windows Server 2025 sends no legacy
+  bitmap updates at all unless the client advertises
+  `FASTPATH_OUTPUT_SUPPORTED`; it does not fall back to slow-path Update PDUs,
+  and Refresh Rect / Suppress Output do not change that.
 - **Open question:** one early run was rejected after Confirm Active with
   `ERRINFO_BAD_CAPABILITIES` (0x10EA) and has not reproduced since, with the
   same capability sets.

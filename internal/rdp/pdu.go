@@ -187,6 +187,8 @@ const (
 	pduType2Control         = 20
 	pduType2Pointer         = 27
 	pduType2Synchronize     = 31
+	pduType2Input           = 28
+	pduType2RefreshRect     = 33
 	pduType2SuppressOutput  = 35
 	pduType2ShutdownDenied  = 37
 	pduType2SaveSessionInfo = 38
@@ -265,6 +267,30 @@ func fontListBody() []byte {
 func suppressOutputBody() []byte {
 	// allowDisplayUpdates = SUPPRESS_DISPLAY_UPDATES; we draw nothing.
 	return []byte{0, 0, 0, 0}
+}
+
+// allowOutputBody re-enables display updates for the whole desktop.
+func allowOutputBody(width, height int) []byte {
+	var w wbuf
+	w.u8(1) // ALLOW_DISPLAY_UPDATES
+	w.zero(3)
+	w.u16(0)
+	w.u16(0)
+	w.u16(uint16(width - 1))
+	w.u16(uint16(height - 1))
+	return w.b
+}
+
+// refreshRectBody asks the server to repaint the whole desktop.
+func refreshRectBody(width, height int) []byte {
+	var w wbuf
+	w.u8(1) // numberOfAreas
+	w.zero(3)
+	w.u16(0)
+	w.u16(0)
+	w.u16(uint16(width - 1))
+	w.u16(uint16(height - 1))
+	return w.b
 }
 
 // --- Licensing ([MS-RDPELE] / [MS-RDPBCGR] 2.2.1.12) --------------------------
@@ -370,4 +396,17 @@ type LogonError struct {
 
 func (e *LogonError) String() string {
 	return fmt.Sprintf("logon notification type 0x%08x data 0x%08x", e.Type, e.Data)
+}
+
+// inputSyncBody is an Input PDU with one Synchronize event: no toggle keys
+// (Scroll/Num/Caps Lock) active. Clients send this after activation.
+func inputSyncBody() []byte {
+	var w wbuf
+	w.u16(1) // numEvents
+	w.u16(0) // pad
+	w.u32(0) // eventTime
+	w.u16(0) // INPUT_EVENT_SYNC
+	w.u16(0) // pad
+	w.u32(0) // toggleFlags
+	return w.b
 }

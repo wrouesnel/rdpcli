@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rdpcli viewer</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #1b1b1f; color: #ddd;
+    font: 13px system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  #bar { padding: 4px 10px; background: #26262c; border-bottom: 1px solid #333;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #wrap { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
+  canvas { max-width: 100%; max-height: 100%; image-rendering: pixelated; background: #000; }
+  #wrap.actual canvas { max-width: none; max-height: none; }
+  #wrap.actual { overflow: auto; align-items: flex-start; justify-content: flex-start; }
+</style>
+</head>
+<body>
+<div id="bar"><span id="status">connecting…</span> · <label><input type="checkbox" id="actual"> 1:1</label></div>
+<div id="wrap"><canvas id="screen" width="0" height="0"></canvas></div>
+<script>
+"use strict";
+const canvas = document.getElementById("screen");
+const ctx = canvas.getContext("2d");
+const statusEl = document.getElementById("status");
+document.getElementById("actual").addEventListener("change", e =>
+  document.getElementById("wrap").classList.toggle("actual", e.target.checked));
+
+// Updates must be applied in order, but image decoding is asynchronous,
+// so chain them on a promise queue.
+let queue = Promise.resolve();
+const enqueue = fn => { queue = queue.then(fn).catch(err => console.error(err)); };
+
+function decodePNG(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return createImageBitmap(new Blob([bytes], { type: "image/png" }));
+}
+
+const es = new EventSource("events");
+es.addEventListener("size", e => {
+  const d = JSON.parse(e.data);
+  enqueue(() => { canvas.width = d.w; canvas.height = d.h; });
+});
+es.addEventListener("rect", e => {
+  const d = JSON.parse(e.data);
+  enqueue(async () => {
+    const bmp = await decodePNG(d.png);
+    ctx.drawImage(bmp, d.x, d.y);
+    bmp.close();
+  });
+});
+es.addEventListener("status", e => {
+  statusEl.textContent = JSON.parse(e.data).text;
+  document.title = "rdpcli · " + statusEl.textContent;
+});
+es.onerror = () => { statusEl.textContent = "viewer connection lost; retrying…"; };
+</script>
+</body>
+</html>
