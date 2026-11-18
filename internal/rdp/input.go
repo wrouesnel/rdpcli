@@ -47,6 +47,8 @@ const (
 	ScanDelete     Scancode = 0xE053
 	ScanLeftWin    Scancode = 0xE05B
 	ScanR          Scancode = 0x13
+	ScanA          Scancode = 0x1E
+	ScanUp         Scancode = 0xE048
 	ScanRightCtrl  Scancode = 0xE01D
 	ScanRightAlt   Scancode = 0xE038
 	ScanRightShift Scancode = 0x36

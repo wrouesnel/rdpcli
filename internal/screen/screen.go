@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/draw"
 	"sync"
+	"time"
 
 	"github.com/wrouesnel/rdpcli/internal/rdp"
 )
@@ -15,6 +16,7 @@ type Framebuffer struct {
 	img   *image.RGBA
 	dirty image.Rectangle
 	gen   uint64 // bumped on resize
+	last  time.Time
 }
 
 // New returns an empty framebuffer.
@@ -48,7 +50,15 @@ func (f *Framebuffer) Draw(bitmaps []rdp.Bitmap) {
 		}
 		draw.Draw(f.img, r, b.Image, b.Image.Rect.Min, draw.Src)
 		f.dirty = f.dirty.Union(r)
+		f.last = time.Now()
 	}
+}
+
+// LastUpdate is when the screen last changed (zero if never).
+func (f *Framebuffer) LastUpdate() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.last
 }
 
 // Size returns the desktop size and a generation number that changes on

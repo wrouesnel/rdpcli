@@ -17,6 +17,9 @@
   canvas.input:focus { box-shadow: 0 0 0 2px #4a7bd0; }
   #bar button { font: inherit; padding: 0 6px; }
   #bar .input-only { display: none; }
+  #ask { display: none; padding: 8px 10px; background: #5a4a10; color: #fff; }
+  #ask.show { display: block; }
+  #ask button { font: inherit; margin-left: 8px; }
   body.input #bar .input-only { display: inline; }
   #wrap.actual canvas { max-width: none; max-height: none; }
   #wrap.actual { overflow: auto; align-items: flex-start; justify-content: flex-start; }
@@ -31,6 +34,7 @@
     <label title="Send every key as a scancode, interpreted by the remote keyboard layout"><input type="checkbox" id="raw"> raw keys</label> ·
   </span>
   <label><input type="checkbox" id="actual"> 1:1</label></div>
+<div id="ask"><span id="ask-text"></span><button id="continue">Continue</button></div>
 <div id="wrap"><canvas id="screen" width="0" height="0" tabindex="0"></canvas></div>
 <script>
 "use strict";
@@ -69,6 +73,13 @@ es.addEventListener("status", e => {
   statusEl.textContent = JSON.parse(e.data).text;
   document.title = "rdpcli · " + statusEl.textContent;
 });
+es.addEventListener("prompt", e => {
+  const text = JSON.parse(e.data).text;
+  document.getElementById("ask-text").textContent = "rdpcli needs you: " + text;
+  document.getElementById("ask").classList.toggle("show", text !== "");
+});
+document.getElementById("continue").addEventListener("click", () =>
+  fetch("continue", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }));
 es.addEventListener("mode", e => setInput(JSON.parse(e.data).input));
 es.onerror = () => { statusEl.textContent = "viewer connection lost; retrying…"; };
 

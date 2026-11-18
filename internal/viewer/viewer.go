@@ -45,6 +45,9 @@ type Server struct {
 	status  string
 
 	input atomic.Pointer[InputFunc]
+
+	prompt    string        // shown as a banner with a Continue button
+	continued chan struct{} // receives when the button is pressed
 }
 
 // InputFunc delivers input events to the remote session.
@@ -55,10 +58,11 @@ func New(fb *screen.Framebuffer) *Server {
 	t := make([]byte, 16)
 	rand.Read(t)
 	return &Server{
-		fb:      fb,
-		token:   hex.EncodeToString(t),
-		enc:     png.Encoder{CompressionLevel: png.BestSpeed},
-		clients: make(map[chan []byte]struct{}),
+		fb:        fb,
+		token:     hex.EncodeToString(t),
+		enc:       png.Encoder{CompressionLevel: png.BestSpeed},
+		clients:   make(map[chan []byte]struct{}),
+		continued: make(chan struct{}, 1),
 	}
 }
 
@@ -80,6 +84,7 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("GET "+s.Path()+"events", s.serveEvents)
 	mux.HandleFunc("POST "+s.Path()+"input", s.serveInput)
+	mux.HandleFunc("POST "+s.Path()+"continue", s.serveContinue)
 	return mux
 }
 
@@ -96,6 +101,45 @@ func (s *Server) SetInput(f InputFunc) {
 
 func (s *Server) modeEvent() []byte {
 	return event("mode", map[string]any{"input": s.input.Load() != nil})
+}
+
+// AskContinue shows msg in a banner with a Continue button, for when the
+// user must do something on the remote desktop before rdpcli can go on.
+// The returned channel receives when the button is pressed; the banner is
+// then hidden.
+func (s *Server) AskContinue(msg string) <-chan struct{} {
+	select { // drop a stale press
+	case <-s.continued:
+	default:
+	}
+	s.mu.Lock()
+	s.prompt = msg
+	s.mu.Unlock()
+	s.broadcast(event("prompt", map[string]any{"text": msg}))
+	return s.continued
+}
+
+func (s *Server) serveContinue(w http.ResponseWriter, r *http.Request) {
+	if o := r.Header.Get("Origin"); o != "" && o != "http://"+r.Host {
+		http.Error(w, "cross-origin request refused", http.StatusForbidden)
+		return
+	}
+	if r.Header.Get("Content-Type") != "application/json" {
+		http.Error(w, "expected application/json", http.StatusUnsupportedMediaType)
+		return
+	}
+	s.mu.Lock()
+	asked := s.prompt != ""
+	s.prompt = ""
+	s.mu.Unlock()
+	if asked {
+		select {
+		case s.continued <- struct{}{}:
+		default:
+		}
+		s.broadcast(event("prompt", map[string]any{"text": ""}))
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // SetStatus shows a status line in connected browsers.
@@ -149,7 +193,7 @@ func (s *Server) serveEvents(w http.ResponseWriter, r *http.Request) {
 
 	ch := make(chan []byte, 256)
 	s.mu.Lock()
-	status := s.status
+	status, prompt := s.status, s.prompt
 	s.clients[ch] = struct{}{}
 	s.mu.Unlock()
 	defer func() {
@@ -163,6 +207,9 @@ func (s *Server) serveEvents(w http.ResponseWriter, r *http.Request) {
 
 	// Start the new browser off with the current state.
 	w.Write(s.modeEvent())
+	if prompt != "" {
+		w.Write(event("prompt", map[string]any{"text": prompt}))
+	}
 	if status != "" {
 		w.Write(event("status", map[string]any{"text": status}))
 	}

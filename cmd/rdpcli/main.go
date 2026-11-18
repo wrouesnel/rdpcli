@@ -21,6 +21,7 @@ commands:
   connect HOST[:PORT]      open an authenticated RDP session, wait for logon, disconnect
   screenshot HOST[:PORT]   log on and save the remote desktop as a PNG
   view HOST[:PORT]         show and control the remote desktop in a local browser page
+  console HOST[:PORT]      open a PowerShell console, run a command, print what it shows
 
 Run "rdpcli <command> -h" for command options.
 `
@@ -38,6 +39,8 @@ func main() {
 		os.Exit(cmdScreenshot(args))
 	case "view":
 		os.Exit(cmdView(args))
+	case "console":
+		os.Exit(cmdConsole(args))
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:

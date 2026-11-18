@@ -6,8 +6,9 @@ enabled (no WinRM/SSH), using a normal authenticated RDP session and its
 standard virtual channels. It is also a vehicle for exploring the protocol.
 
 Status: early. rdpcli can log on to an RDP session, save a screenshot of the
-desktop, and show and control the desktop from a local browser page
-(keyboard and mouse).
+desktop, show and control the desktop from a local browser page (keyboard and
+mouse), and run a PowerShell command in a console it opens on the remote
+desktop, reading the output back off the screen.
 
 ## Build
 
@@ -30,6 +31,47 @@ rdpcli screenshot rdp.example.com -u alice -o desktop.png --tls-sha256 <fingerpr
 rdpcli view rdp.example.com -u alice --tls-sha256 <fingerprint>
 rdpcli view rdp.example.com -u alice --view-only --tls-sha256 <fingerprint>
 ```
+
+## Console: PowerShell over the screen and keyboard
+
+```sh
+rdpcli console rdp.example.com -u alice -c 'Get-Service | Where Status -eq Running' --tls-sha256 <fingerprint>
+rdpcli console rdp.example.com -u alice --no-interactive -c 'hostname' ...   # in scripts
+```
+
+`console` needs nothing on the server beyond an RDP logon: no WinRM, no
+virtual channels (which policy often disables), no agent. It works like a
+person at the keyboard:
+
+1. It opens the Run box (Win+R) and starts
+   `conhost.exe powershell.exe -NoProfile` with a calibration command on its
+   command line. conhost is named so the console is a classic console window
+   even where Windows Terminal is the default; PSReadLine is removed because
+   it ignores the Unicode key events rdpcli types with.
+2. The calibration command prints a strip of 16 cells in alternating
+   colours, the printable ASCII characters, and the window size. From these
+   rdpcli learns where the character cells are and what each character looks
+   like in the console's font, so no font data is built in and any font or
+   size works. RDP does not antialias text unless the client asks, so cells
+   arrive exactly and are matched exactly.
+3. Once that console is seen, rdpcli maximises it, calibrates again, types
+   the command, waits for the prompt to come back, and prints the text
+   between the command and the prompt.
+
+Nothing is typed until the console has been seen on screen (the calibration
+rows carry a random nonce, so an old console can't be mistaken for the new
+one). If the console never appears, or the session is not logged on (a legal
+notice, a password change), `console` starts the browser viewer, prints its
+URL and asks you to sort out the desktop there, then press Continue.
+`--no-interactive` makes it fail instead, for scripts.
+
+Current limits: output is read from the visible window, so only the last
+window's worth of a long output is returned (with an error saying so); text
+outside printable ASCII reads as U+FFFD; a run takes about 12 s, mostly
+waiting for windows to appear. A paged transfer that never loses scrolled
+output is the next step.
+
+## Viewer
 
 The viewer listens on 127.0.0.1 only (change with `--listen`), and its URL
 contains a random token so other local users cannot guess it. It is a plain
@@ -67,6 +109,7 @@ fingerprint is printed on connect) or skip verification with `--tls-insecure`.
 | Fast-path output, bitmap updates | MS-RDPBCGR 2.2.9.1.2 | with fragment reassembly; no bulk compression, no pointer shapes yet |
 | Interleaved RLE bitmap codec | MS-RDPBCGR 2.2.9.1.1.3.1.2.4 | 15/16/24 bpp; the session runs at 16 bpp |
 | Keyboard and mouse input | MS-RDPBCGR 2.2.8.1.1.3 | slow-path Input PDUs: scancode, Unicode, mouse, extended buttons, wheel, sync |
+| Console text reading | | calibrated glyph matching on conhost; see "Console" above |
 
 ## Protocol notes
 
@@ -83,6 +126,12 @@ fingerprint is printed on connect) or skip verification with `--tls-insecure`.
   bitmap updates at all unless the client advertises
   `FASTPATH_OUTPUT_SUPPORTED`; it does not fall back to slow-path Update PDUs,
   and Refresh Rect / Suppress Output do not change that.
+- **Input right after connecting:** Windows ignores keystrokes for a moment
+  after a client connects, while it switches the session over to the new
+  connection. `console` waits for the screen to stop changing before it types.
+- **Unicode keys and PSReadLine:** PSReadLine (loaded by default in
+  PowerShell 5.1) ignores Unicode key events (VK_PACKET), so text typed that
+  way never reaches the prompt. Without PSReadLine, conhost takes them.
 - **Open question:** one early run was rejected after Confirm Active with
   `ERRINFO_BAD_CAPABILITIES` (0x10EA) and has not reproduced since, with the
   same capability sets.
