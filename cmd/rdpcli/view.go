@@ -16,6 +16,7 @@ import (
 func cmdView(args []string) int {
 	f := newConnFlags("view", "view HOST[:PORT] -u USER [options]")
 	listen := f.fs.String("listen", "127.0.0.1:0", "address for the local viewer web page")
+	viewOnly := f.fs.Bool("view-only", false, "do not send keyboard or mouse input")
 	host, ok := f.parse(args)
 	if !ok {
 		return 2
@@ -45,6 +46,7 @@ func cmdView(args []string) int {
 	fmt.Printf("viewer: http://%s%s\n", ln.Addr(), v.Path())
 	v.SetStatus("connecting to %s…", host)
 
+	opened := false // openSession reports logons before it returns
 	onEvent := func(ev rdp.Event) {
 		if ev.Activated {
 			fb.Resize(ev.Width, ev.Height)
@@ -52,9 +54,19 @@ func cmdView(args []string) int {
 		if len(ev.Bitmaps) > 0 {
 			fb.Draw(ev.Bitmaps)
 		}
+		if ev.LoggedOn != nil && opened {
+			// Logged on by hand after the session opened.
+			who := describeLogon(ev.LoggedOn)
+			status("logged on as %s, session id %d", who, ev.LoggedOn.SessionID)
+			v.SetStatus("%s on %s (session %d)", who, host, ev.LoggedOn.SessionID)
+		}
+	}
+	opts := sessionOpts{onEvent: onEvent, interactive: !*viewOnly}
+	if !*viewOnly {
+		opts.onConn = func(c *rdp.Conn) { v.SetInput(c.SendInput) }
 	}
 	lctx, lcancel := context.WithTimeout(ctx, *f.timeout)
-	s, err := openSession(lctx, cfg, start, onEvent)
+	s, err := openSession(lctx, cfg, start, opts)
 	lcancel()
 	if err != nil {
 		status("%v", err)
@@ -62,11 +74,12 @@ func cmdView(args []string) int {
 		time.Sleep(500 * time.Millisecond) // let the browser see it
 		return 1
 	}
-	who := s.logon.User
-	if s.logon.Domain != "" {
-		who = s.logon.Domain + `\` + who
+	opened = true
+	if s.logon != nil {
+		v.SetStatus("%s on %s (session %d)", describeLogon(s.logon), host, s.logon.SessionID)
+	} else {
+		v.SetStatus("%s: not logged on yet; complete the logon on the screen", host)
 	}
-	v.SetStatus("%s on %s (session %d) — view only; Ctrl-C in the terminal to disconnect", who, host, s.logon.SessionID)
 	status("viewing; press Ctrl-C to disconnect")
 
 	err = s.pump(ctx, onEvent)
@@ -78,6 +91,7 @@ func cmdView(args []string) int {
 		return 1
 	}
 	status("disconnecting")
+	v.SetInput(nil)
 	v.SetStatus("disconnected")
 	s.close()
 	return 0

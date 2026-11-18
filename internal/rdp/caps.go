@@ -194,6 +194,9 @@ func parseServerCaps(r *rbuf, n uint16) serverCaps {
 			refresh, suppress := body.u8(), body.u8()
 			sc.names[len(sc.names)-1] += fmt.Sprintf("[extraFlags=0x%04x refreshRect=%d suppressOutput=%d]", extra, refresh, suppress)
 		}
+		if typ == capInput {
+			sc.names[len(sc.names)-1] += fmt.Sprintf("[inputFlags=0x%04x]", body.u16())
+		}
 		if typ == capBitmap {
 			sc.bpp = body.u16()
 			body.skip(6)

@@ -13,6 +13,8 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wrouesnel/rdpcli/internal/credssp"
@@ -46,7 +48,9 @@ type Conn struct {
 	br        *bufio.Reader
 	userID    uint16
 	ioChannel uint16
-	shareID   uint32
+	shareID   atomic.Uint32
+	active    atomic.Bool // finalized and not deactivated: input may be sent
+	wmu       sync.Mutex  // serializes writes (Next and SendInput run concurrently)
 
 	// CertSHA256 is the hex SHA-256 fingerprint of the server certificate.
 	CertSHA256 string
@@ -239,6 +243,8 @@ func (c *Conn) connect() error {
 }
 
 func (c *Conn) writeX224(p []byte) error {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
 	w := io.Writer(c.conn)
 	if c.tls != nil {
 		w = c.tls
@@ -324,7 +330,7 @@ func (c *Conn) disconnectError() error {
 }
 
 func (c *Conn) sendData(pduType2 uint8, body []byte) error {
-	return c.sendIO(shareData(c.shareID, c.userID, pduType2, body))
+	return c.sendIO(shareData(c.shareID.Load(), c.userID, pduType2, body))
 }
 
 // Event is something the session reported while running.
@@ -367,10 +373,12 @@ func (c *Conn) Next() (Event, error) {
 		}
 		switch pduType {
 		case pduTypeDemandActive:
+			c.active.Store(false)
 			if err := c.activate(r); err != nil {
 				return Event{}, err
 			}
 		case pduTypeDeactivateAll:
+			c.active.Store(false)
 			c.logf("share: deactivate all; waiting for reactivation")
 		case pduTypeData:
 			ev, ok, err := c.handleData(r)
@@ -389,7 +397,7 @@ func (c *Conn) Next() (Event, error) {
 }
 
 func (c *Conn) activate(r *rbuf) error {
-	c.shareID = r.u32()
+	shareID := r.u32()
 	srcLen := int(r.u16())
 	r.u16() // lengthCombinedCapabilities
 	r.skip(srcLen)
@@ -400,7 +408,7 @@ func (c *Conn) activate(r *rbuf) error {
 		return fmt.Errorf("rdp: truncated Demand Active PDU")
 	}
 	c.logf("share: demand active, share id 0x%08x, server capabilities: %s",
-		c.shareID, strings.Join(sc.names, " "))
+		shareID, strings.Join(sc.names, " "))
 	width, height, bpp := c.cfg.Width, c.cfg.Height, uint16(16)
 	if sc.bpp != 0 {
 		width, height, bpp = sc.width, sc.height, sc.bpp
@@ -408,7 +416,8 @@ func (c *Conn) activate(r *rbuf) error {
 	c.logf("share: session %dx%d at %d bpp", width, height, bpp)
 	c.width, c.height = int(width), int(height)
 
-	if err := c.sendIO(confirmActivePDU(c.shareID, c.userID, width, height, bpp)); err != nil {
+	c.shareID.Store(shareID)
+	if err := c.sendIO(confirmActivePDU(shareID, c.userID, width, height, bpp)); err != nil {
 		return err
 	}
 	for _, pdu := range []struct {
@@ -463,6 +472,7 @@ func (c *Conn) handleData(r *rbuf) (Event, bool, error) {
 				return Event{}, false, err
 			}
 		}
+		c.active.Store(true)
 		c.logf("share: connection finalized")
 		return Event{Activated: true, Width: c.width, Height: c.height}, true, nil
 	case pduType2Update:
@@ -512,10 +522,13 @@ func (c *Conn) Disconnect() error {
 	if c.tls == nil {
 		return nil
 	}
+	c.active.Store(false)
 	c.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 	if err := c.writeX224(mcsDisconnect()); err != nil {
 		return err
 	}
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
 	return c.tls.CloseWrite()
 }
 

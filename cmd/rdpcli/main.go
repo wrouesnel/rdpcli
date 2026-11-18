@@ -20,7 +20,7 @@ const usage = `usage: rdpcli <command> [options]
 commands:
   connect HOST[:PORT]      open an authenticated RDP session, wait for logon, disconnect
   screenshot HOST[:PORT]   log on and save the remote desktop as a PNG
-  view HOST[:PORT]         show the remote desktop in a local browser page
+  view HOST[:PORT]         show and control the remote desktop in a local browser page
 
 Run "rdpcli <command> -h" for command options.
 `
@@ -61,7 +61,7 @@ func cmdConnect(args []string) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *f.timeout)
 	defer cancel()
-	s, err := openSession(ctx, cfg, start, nil)
+	s, err := openSession(ctx, cfg, start, sessionOpts{})
 	if err != nil {
 		status("%v", err)
 		return 1
@@ -114,7 +114,7 @@ func cmdScreenshot(args []string) int {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *f.timeout)
 	defer cancel()
-	s, err := openSession(ctx, cfg, start, onEvent)
+	s, err := openSession(ctx, cfg, start, sessionOpts{onEvent: onEvent})
 	if err != nil {
 		status("%v", err)
 		return 1

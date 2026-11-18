@@ -6,8 +6,8 @@ enabled (no WinRM/SSH), using a normal authenticated RDP session and its
 standard virtual channels. It is also a vehicle for exploring the protocol.
 
 Status: early. rdpcli can log on to an RDP session, save a screenshot of the
-desktop, and show the desktop live in a local browser page (view only: no
-keyboard or mouse input yet).
+desktop, and show and control the desktop from a local browser page
+(keyboard and mouse).
 
 ## Build
 
@@ -26,14 +26,28 @@ rdpcli connect 127.0.0.1 -u rdpadmin --password-stdin --tls-insecure --hold 30s 
 # Save the desktop as a PNG once it has finished drawing
 rdpcli screenshot rdp.example.com -u alice -o desktop.png --tls-sha256 <fingerprint>
 
-# Live view in a browser: prints a http://127.0.0.1:PORT/<token>/ URL to open
+# Live desktop in a browser: prints a http://127.0.0.1:PORT/<token>/ URL to open
 rdpcli view rdp.example.com -u alice --tls-sha256 <fingerprint>
+rdpcli view rdp.example.com -u alice --view-only --tls-sha256 <fingerprint>
 ```
 
 The viewer listens on 127.0.0.1 only (change with `--listen`), and its URL
 contains a random token so other local users cannot guess it. It is a plain
 stdlib web page fed by Server-Sent Events, which keeps the binary static; a
 native GUI toolkit would need cgo.
+
+In the viewer, click the screen to give it the keyboard. Printable
+characters are sent as Unicode key events, so they type the same whatever
+the server's keyboard layout; shortcuts (with Ctrl, Alt or Win held) and
+non-printing keys go as scancodes. "raw keys" sends everything as
+scancodes, for programs that read physical keys. "Type clipboard" types the
+local clipboard's text into the session as keystrokes, which works even
+where clipboard redirection is disabled. Keys the browser keeps for itself
+(such as Ctrl+W) cannot be sent; Ctrl+Alt+Del has a button.
+
+If the session is active but Windows has not reported a logon within a few
+seconds (a legal notice, a password change, a logon screen), `view` keeps
+the session open so the logon can be completed in the browser.
 
 Server certificates are verified against the system roots by default. Most RDP
 hosts use self-signed certificates, so pin one with `--tls-sha256` (the
@@ -52,6 +66,7 @@ fingerprint is printed on connect) or skip verification with `--tls-insecure`.
 | Save Session Info (logon notification) | MS-RDPBCGR 2.2.10.1 | |
 | Fast-path output, bitmap updates | MS-RDPBCGR 2.2.9.1.2 | with fragment reassembly; no bulk compression, no pointer shapes yet |
 | Interleaved RLE bitmap codec | MS-RDPBCGR 2.2.9.1.1.3.1.2.4 | 15/16/24 bpp; the session runs at 16 bpp |
+| Keyboard and mouse input | MS-RDPBCGR 2.2.8.1.1.3 | slow-path Input PDUs: scancode, Unicode, mouse, extended buttons, wheel, sync |
 
 ## Protocol notes
 

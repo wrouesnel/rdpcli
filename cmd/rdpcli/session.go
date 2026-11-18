@@ -181,12 +181,29 @@ func status(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, "rdpcli: "+format+"\n", a...)
 }
 
+// sessionOpts adjust openSession.
+type sessionOpts struct {
+	// onEvent, if set, sees every event, including those before logon (the
+	// server starts drawing before it reports the logon).
+	onEvent func(rdp.Event)
+	// onConn, if set, is called with each new connection before its
+	// events are read, e.g. to route input to it.
+	onConn func(*rdp.Conn)
+	// interactive: if the session is active but the logon has not been
+	// reported within logonGrace, return it anyway (session.logon is nil)
+	// so a user can complete the logon by hand, e.g. through a legal
+	// notice, a password change or a logon screen.
+	interactive bool
+}
+
+// logonGrace is how long an interactive open waits for an automatic logon.
+const logonGrace = 5 * time.Second
+
 // openSession connects and logs on, retrying the transient "dropped before
-// logon" case. onEvent, if set, sees every event, including those before
-// logon (the server starts drawing before it reports the logon).
-func openSession(ctx context.Context, cfg rdp.Config, start time.Time, onEvent func(rdp.Event)) (*session, error) {
+// logon" case.
+func openSession(ctx context.Context, cfg rdp.Config, start time.Time, opts sessionOpts) (*session, error) {
 	for attempt := 1; ; attempt++ {
-		s, retry, err := tryLogOn(ctx, cfg, start, onEvent)
+		s, retry, err := tryLogOn(ctx, cfg, start, opts)
 		if err == nil {
 			return s, nil
 		}
@@ -210,12 +227,15 @@ func openSession(ctx context.Context, cfg rdp.Config, start time.Time, onEvent f
 // server dropping an activated connection before logon without giving a
 // reason, which Windows does when a new connection races the teardown of
 // the previous one to the same session.
-func tryLogOn(ctx context.Context, cfg rdp.Config, start time.Time, onEvent func(rdp.Event)) (*session, bool, error) {
+func tryLogOn(ctx context.Context, cfg rdp.Config, start time.Time, opts sessionOpts) (*session, bool, error) {
 	conn, err := rdp.Dial(ctx, cfg)
 	if err != nil {
 		return nil, false, fmt.Errorf("connect: %w", err)
 	}
 	status("connected to %s: %s, certificate sha256 %s", cfg.Addr, conn.Protocol, conn.CertSHA256)
+	if opts.onConn != nil {
+		opts.onConn(conn)
+	}
 
 	s := &session{conn: conn, events: make(chan result, 16)}
 	go func() {
@@ -229,31 +249,35 @@ func tryLogOn(ctx context.Context, cfg rdp.Config, start time.Time, onEvent func
 	}()
 
 	activated := false
+	var grace <-chan time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			conn.Close()
 			return nil, false, errors.New("timed out waiting for logon")
+		case <-grace:
+			status("no automatic logon after %v; continuing so the logon can be completed by hand", logonGrace)
+			return s, false, nil
 		case res := <-s.events:
 			if res.err != nil {
 				conn.Close()
 				return nil, activated && res.err == rdp.ErrDisconnected, res.err
 			}
-			if onEvent != nil {
-				onEvent(res.ev)
+			if opts.onEvent != nil {
+				opts.onEvent(res.ev)
 			}
 			switch {
 			case res.ev.Activated:
 				activated = true
+				if opts.interactive && grace == nil {
+					grace = time.After(logonGrace)
+				}
 				status("session activated (%dx%d) after %.1fs", res.ev.Width, res.ev.Height, time.Since(start).Seconds())
 			case res.ev.LogonError != nil:
 				status("server: %s", res.ev.LogonError)
 			case res.ev.LoggedOn != nil:
 				s.logon = res.ev.LoggedOn
-				who := s.logon.User
-				if s.logon.Domain != "" {
-					who = s.logon.Domain + `\` + who
-				}
+				who := describeLogon(s.logon)
 				status("logged on as %s, session id %d, after %.1fs", who, s.logon.SessionID, time.Since(start).Seconds())
 				return s, false, nil
 			}
@@ -297,4 +321,12 @@ func (s *session) close() {
 			return
 		}
 	}
+}
+
+// describeLogon names the logged-on user as DOMAIN\user.
+func describeLogon(l *rdp.LogonInfo) string {
+	if l.Domain != "" {
+		return l.Domain + `\` + l.User
+	}
+	return l.User
 }

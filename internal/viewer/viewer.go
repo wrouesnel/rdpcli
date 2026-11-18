@@ -2,7 +2,8 @@
 //
 // The page draws onto a canvas from a Server-Sent Events stream: a "size"
 // event when the desktop size is known or changes, then "rect" events
-// carrying PNG tiles of changed regions. Everything is stdlib so the binary
+// carrying PNG tiles of changed regions. Keyboard and mouse input comes
+// back as JSON batches POSTed to "input". Everything is stdlib so the binary
 // stays static.
 package viewer
 
@@ -19,8 +20,11 @@ import (
 	"image/png"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf16"
 
+	"github.com/wrouesnel/rdpcli/internal/rdp"
 	"github.com/wrouesnel/rdpcli/internal/screen"
 )
 
@@ -39,7 +43,12 @@ type Server struct {
 	mu      sync.Mutex
 	clients map[chan []byte]struct{}
 	status  string
+
+	input atomic.Pointer[InputFunc]
 }
+
+// InputFunc delivers input events to the remote session.
+type InputFunc func(events ...rdp.InputEvent) error
 
 // New returns a viewer for fb, reachable under a random URL token.
 func New(fb *screen.Framebuffer) *Server {
@@ -70,7 +79,23 @@ func (s *Server) Handler() http.Handler {
 		w.Write(indexHTML)
 	})
 	mux.HandleFunc("GET "+s.Path()+"events", s.serveEvents)
+	mux.HandleFunc("POST "+s.Path()+"input", s.serveInput)
 	return mux
+}
+
+// SetInput enables keyboard and mouse input from browsers, sending it with
+// f; nil makes the viewer view-only (the default).
+func (s *Server) SetInput(f InputFunc) {
+	if f == nil {
+		s.input.Store(nil)
+	} else {
+		s.input.Store(&f)
+	}
+	s.broadcast(s.modeEvent())
+}
+
+func (s *Server) modeEvent() []byte {
+	return event("mode", map[string]any{"input": s.input.Load() != nil})
 }
 
 // SetStatus shows a status line in connected browsers.
@@ -137,6 +162,7 @@ func (s *Server) serveEvents(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Start the new browser off with the current state.
+	w.Write(s.modeEvent())
 	if status != "" {
 		w.Write(event("status", map[string]any{"text": status}))
 	}
@@ -183,4 +209,96 @@ func (s *Server) Run(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// inputEvent is one event in a batch from the page.
+type inputEvent struct {
+	T    string `json:"t"`    // k: key by code, u: Unicode key, m: mouse, w: wheel, s: sync, type: text, cad: Ctrl+Alt+Del
+	Code string `json:"code"` // k
+	Text string `json:"text"` // u (one character), type
+	Down bool   `json:"down"` // k, u, m
+	X    int    `json:"x"`    // m, w
+	Y    int    `json:"y"`    // m, w
+	B    int    `json:"b"`    // m: button, 0 for a move
+	D    int    `json:"d"`    // w: wheel units, positive is up/right
+	H    bool   `json:"h"`    // w: horizontal
+	Tog  uint32 `json:"tog"`  // s: toggle key states
+}
+
+// maxInputBody bounds one POSTed batch (a large paste included).
+const maxInputBody = 1 << 20
+
+func (s *Server) serveInput(w http.ResponseWriter, r *http.Request) {
+	// The URL token keeps other local users out; requiring a same-origin
+	// JSON request keeps other web pages in this browser out too (a
+	// cross-origin JSON POST needs a CORS preflight, which is not answered).
+	if o := r.Header.Get("Origin"); o != "" && o != "http://"+r.Host {
+		http.Error(w, "cross-origin input refused", http.StatusForbidden)
+		return
+	}
+	if r.Header.Get("Content-Type") != "application/json" {
+		http.Error(w, "expected application/json", http.StatusUnsupportedMediaType)
+		return
+	}
+	send := s.input.Load()
+	if send == nil {
+		http.Error(w, "view only", http.StatusForbidden)
+		return
+	}
+	var batch []inputEvent
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxInputBody)).Decode(&batch); err != nil {
+		http.Error(w, "bad input batch", http.StatusBadRequest)
+		return
+	}
+	var evs []rdp.InputEvent
+	for _, e := range batch {
+		evs = append(evs, translate(e)...)
+	}
+	if len(evs) == 0 {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if err := (*send)(evs...); err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// translate turns a page event into RDP input events; unknown or malformed
+// events are dropped.
+func translate(e inputEvent) []rdp.InputEvent {
+	switch e.T {
+	case "k":
+		if sc, ok := codeScancodes[e.Code]; ok {
+			return []rdp.InputEvent{rdp.Key(sc, e.Down)}
+		}
+	case "u":
+		units := utf16.Encode([]rune(e.Text))
+		if len(units) == 0 || len(units) > 2 {
+			return nil
+		}
+		var evs []rdp.InputEvent
+		for _, u := range units {
+			evs = append(evs, rdp.KeyUnicode(u, e.Down))
+		}
+		return evs
+	case "m":
+		if e.B < rdp.ButtonNone || e.B > rdp.ButtonX2 {
+			return nil
+		}
+		return []rdp.InputEvent{rdp.Mouse(e.X, e.Y, e.B, e.Down)}
+	case "w":
+		return []rdp.InputEvent{rdp.Wheel(e.X, e.Y, e.D, e.H)}
+	case "s":
+		return []rdp.InputEvent{rdp.Sync(e.Tog & 0xF)}
+	case "type":
+		return rdp.TextEvents(e.Text)
+	case "cad":
+		return []rdp.InputEvent{
+			rdp.Key(rdp.ScanLeftCtrl, true), rdp.Key(rdp.ScanLeftAlt, true), rdp.Key(rdp.ScanDelete, true),
+			rdp.Key(rdp.ScanDelete, false), rdp.Key(rdp.ScanLeftAlt, false), rdp.Key(rdp.ScanLeftCtrl, false),
+		}
+	}
+	return nil
 }

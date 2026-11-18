@@ -12,14 +12,26 @@
   #bar { padding: 4px 10px; background: #26262c; border-bottom: 1px solid #333;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #wrap { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
-  canvas { max-width: 100%; max-height: 100%; image-rendering: pixelated; background: #000; }
+  canvas { max-width: 100%; max-height: 100%; image-rendering: pixelated; background: #000;
+    outline: none; touch-action: none; }
+  canvas.input:focus { box-shadow: 0 0 0 2px #4a7bd0; }
+  #bar button { font: inherit; padding: 0 6px; }
+  #bar .input-only { display: none; }
+  body.input #bar .input-only { display: inline; }
   #wrap.actual canvas { max-width: none; max-height: none; }
   #wrap.actual { overflow: auto; align-items: flex-start; justify-content: flex-start; }
 </style>
 </head>
 <body>
-<div id="bar"><span id="status">connecting…</span> · <label><input type="checkbox" id="actual"> 1:1</label></div>
-<div id="wrap"><canvas id="screen" width="0" height="0"></canvas></div>
+<div id="bar"><span id="status">connecting…</span> ·
+  <span id="mode">view only</span> ·
+  <span class="input-only">
+    <button id="cad" title="Send Ctrl+Alt+Del">Ctrl+Alt+Del</button>
+    <button id="paste" title="Type the local clipboard's text into the remote session">Type clipboard</button>
+    <label title="Send every key as a scancode, interpreted by the remote keyboard layout"><input type="checkbox" id="raw"> raw keys</label> ·
+  </span>
+  <label><input type="checkbox" id="actual"> 1:1</label></div>
+<div id="wrap"><canvas id="screen" width="0" height="0" tabindex="0"></canvas></div>
 <script>
 "use strict";
 const canvas = document.getElementById("screen");
@@ -57,7 +69,155 @@ es.addEventListener("status", e => {
   statusEl.textContent = JSON.parse(e.data).text;
   document.title = "rdpcli · " + statusEl.textContent;
 });
+es.addEventListener("mode", e => setInput(JSON.parse(e.data).input));
 es.onerror = () => { statusEl.textContent = "viewer connection lost; retrying…"; };
+
+// ---- Input ----
+// Events are batched and POSTed one batch at a time, so they arrive in
+// order; pointer moves are coalesced while a batch is in flight.
+const modeEl = document.getElementById("mode");
+let inputOn = false;
+function setInput(on) {
+  inputOn = on;
+  document.body.classList.toggle("input", on);
+  canvas.classList.toggle("input", on);
+  modeEl.textContent = on ? "click the screen to type" : "view only";
+  if (!on) releaseAll(false);
+}
+
+let pending = [], inflight = false;
+function send(ev) {
+  if (!inputOn) return;
+  const last = pending[pending.length - 1];
+  if (ev.t === "m" && ev.b === 0 && last && last.t === "m" && last.b === 0) pending[pending.length - 1] = ev;
+  else pending.push(ev);
+  flush();
+}
+async function flush() {
+  if (inflight || pending.length === 0) return;
+  inflight = true;
+  const batch = pending;
+  pending = [];
+  try {
+    const r = await fetch("input", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(batch) });
+    if (!r.ok) modeEl.textContent = "input refused: " + (await r.text()).trim();
+  } catch (err) {
+    modeEl.textContent = "input failed: " + err;
+  }
+  inflight = false;
+  flush();
+}
+
+// Keys: printable characters go as Unicode (layout-independent) unless a
+// Ctrl/Alt/Meta shortcut is held or "raw keys" is on; everything else goes
+// as a scancode. Each press remembers how it was sent so its release
+// matches, whatever the modifiers are by then.
+const rawEl = document.getElementById("raw");
+const pressed = new Map(); // code -> {u: char} | {k: true}
+let toggles = -1;
+function syncToggles(e) {
+  const t = (e.getModifierState("ScrollLock") ? 1 : 0) | (e.getModifierState("NumLock") ? 2 : 0) |
+            (e.getModifierState("CapsLock") ? 4 : 0);
+  if (t !== toggles) { toggles = t; send({ t: "s", tog: t }); }
+}
+canvas.addEventListener("keydown", e => {
+  if (!inputOn) return;
+  e.preventDefault();
+  if (e.key === "Dead" || e.key === "AltGraph" || e.isComposing) return;
+  if (!pressed.size && !["CapsLock", "NumLock", "ScrollLock"].includes(e.code)) syncToggles(e);
+  const chars = [...e.key];
+  const printable = chars.length === 1 && e.key >= " " &&
+    (!(e.ctrlKey || e.altKey || e.metaKey) || e.getModifierState("AltGraph"));
+  if (printable && !rawEl.checked) {
+    pressed.set(e.code, { u: e.key });
+    send({ t: "u", text: e.key, down: true });
+  } else {
+    pressed.set(e.code, { k: true });
+    send({ t: "k", code: e.code, down: true });
+  }
+});
+canvas.addEventListener("keyup", e => {
+  if (!inputOn) return;
+  e.preventDefault();
+  const p = pressed.get(e.code);
+  if (!p) return;
+  pressed.delete(e.code);
+  send(p.u ? { t: "u", text: p.u, down: false } : { t: "k", code: e.code, down: false });
+});
+
+// Mouse, in desktop coordinates.
+const buttonMap = [1, 3, 2, 4, 5]; // browser button -> left, middle, right, X1, X2
+const buttonsDown = new Set();
+let lastPos = { x: 0, y: 0 };
+function pos(e) {
+  const r = canvas.getBoundingClientRect();
+  return lastPos = {
+    x: Math.max(0, Math.min(canvas.width - 1, Math.floor((e.clientX - r.left) * canvas.width / r.width))),
+    y: Math.max(0, Math.min(canvas.height - 1, Math.floor((e.clientY - r.top) * canvas.height / r.height))),
+  };
+}
+canvas.addEventListener("pointermove", e => { if (inputOn) send({ t: "m", ...pos(e), b: 0 }); });
+canvas.addEventListener("pointerdown", e => {
+  if (!inputOn) return;
+  canvas.focus();
+  e.preventDefault();
+  const b = buttonMap[e.button];
+  if (!b) return;
+  canvas.setPointerCapture(e.pointerId);
+  buttonsDown.add(b);
+  send({ t: "m", ...pos(e), b, down: true });
+});
+canvas.addEventListener("pointerup", e => {
+  if (!inputOn) return;
+  const b = buttonMap[e.button];
+  if (!b || !buttonsDown.delete(b)) return;
+  send({ t: "m", ...pos(e), b, down: false });
+});
+canvas.addEventListener("contextmenu", e => { if (inputOn) e.preventDefault(); });
+// Wheel: pixel deltas are accumulated into notches of 120 units.
+let wheelY = 0, wheelX = 0;
+canvas.addEventListener("wheel", e => {
+  if (!inputOn) return;
+  e.preventDefault();
+  const scale = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 800 : 1;
+  wheelY += e.deltaY * scale;
+  wheelX += e.deltaX * scale;
+  const p = pos(e);
+  for (; Math.abs(wheelY) >= 50; wheelY -= Math.sign(wheelY) * 50) send({ t: "w", ...p, d: wheelY > 0 ? -120 : 120 });
+  for (; Math.abs(wheelX) >= 50; wheelX -= Math.sign(wheelX) * 50) send({ t: "w", ...p, d: wheelX > 0 ? 120 : -120, h: true });
+}, { passive: false });
+
+// Losing focus mid-press would leave keys or buttons stuck down remotely.
+function releaseAll(doSend = true) {
+  if (doSend) {
+    for (const [code, p] of pressed) send(p.u ? { t: "u", text: p.u, down: false } : { t: "k", code, down: false });
+    for (const b of buttonsDown) send({ t: "m", ...lastPos, b, down: false });
+  }
+  pressed.clear();
+  buttonsDown.clear();
+  toggles = -1;
+}
+canvas.addEventListener("blur", () => releaseAll());
+window.addEventListener("blur", () => releaseAll());
+
+document.getElementById("cad").addEventListener("click", () => { send({ t: "cad" }); canvas.focus(); });
+document.getElementById("paste").addEventListener("click", async () => {
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text) send({ t: "type", text });
+  } catch (err) {
+    modeEl.textContent = "clipboard not readable: " + err.message;
+  }
+  canvas.focus();
+});
+// A paste from the browser's own menu while the screen has focus.
+canvas.addEventListener("paste", e => {
+  if (!inputOn) return;
+  e.preventDefault();
+  const text = e.clipboardData.getData("text");
+  if (text) send({ t: "type", text });
+});
 </script>
 </body>
 </html>
