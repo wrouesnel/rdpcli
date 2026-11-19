@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/wrouesnel/rdpcli/internal/console"
 	"github.com/wrouesnel/rdpcli/internal/rdp"
 	"github.com/wrouesnel/rdpcli/internal/screen"
@@ -35,7 +37,8 @@ var promptRE = regexp.MustCompile(`^PS .*>$`)
 
 func cmdConsole(args []string) int {
 	f := newConnFlags("console", "console HOST[:PORT] -u USER [-c COMMAND] [options]")
-	command := f.fs.String("c", "", "PowerShell command to run; its output is printed (one window's worth for now)")
+	command := f.fs.String("c", "", "PowerShell command to run; its output is printed and its status is the exit code")
+	width := f.fs.Int("output-width", 0, "format output for this many columns (default: this terminal's width, or 120)")
 	keep := f.fs.Bool("keep", false, "leave the console window open on the remote desktop")
 	cmdTimeout := f.fs.Duration("command-timeout", time.Minute, "time limit for the command to finish")
 	noInteractive := f.fs.Bool("no-interactive", false, "never ask for help in the browser viewer; fail instead (for scripts)")
@@ -125,13 +128,21 @@ func cmdConsole(args []string) int {
 
 	code := 0
 	if *command != "" {
-		out, err := runCommand(d, r, *command, *cmdTimeout)
-		for _, l := range out {
-			fmt.Println(l)
+		w := *width
+		if w <= 0 {
+			w = terminalWidth()
 		}
-		if err != nil {
+		out, st, err := runPaged(d, r, *command, w, *cmdTimeout)
+		os.Stdout.WriteString(out)
+		switch {
+		case err != nil:
 			status("%v", err)
 			code = 1
+		case st != 0:
+			code = st & 0xFF
+			if code == 0 {
+				code = 1
+			}
 		}
 	} else {
 		scr := r.Read(d.snapshot())
@@ -140,11 +151,24 @@ func cmdConsole(args []string) int {
 		}
 	}
 	if !*keep {
-		if err := d.typeText("exit\n"); err == nil {
-			d.sleep(500 * time.Millisecond)
-		}
+		closeConsole(d)
 	}
 	return code
+}
+
+// closeConsole exits the console: "q" stops a transfer the helper may
+// still be showing (after an error), Escape clears whatever is on the
+// prompt line, then exit.
+func closeConsole(d *desktop) {
+	if d.typeText("q") != nil || d.sleep(300*time.Millisecond) != nil {
+		return
+	}
+	if d.chord(rdp.ScanEsc) != nil || d.sleep(100*time.Millisecond) != nil {
+		return
+	}
+	if d.typeText("exit\n") == nil {
+		d.sleep(500 * time.Millisecond)
+	}
 }
 
 // launchConsole opens a maximised PowerShell console with Win+R and
@@ -227,58 +251,181 @@ func waitCalibration(d *desktop, nonce uint32, timeout time.Duration) (*console.
 	return nil, lastErr
 }
 
-// runCommand clears the console, runs one command line and returns its
-// output, read off the screen once the prompt is back.
-func runCommand(d *desktop, r *console.Reader, command string, timeout time.Duration) ([]string, error) {
-	if err := d.typeText("cls\n"); err != nil {
-		return nil, err
+// installHelper types the paging helper into the console and clears it.
+// Nothing more is typed until the cleared prompt is seen: keys typed while
+// cls runs can be lost.
+func installHelper(d *desktop, r *console.Reader) error {
+	if err := d.typeFast(console.HelperFunction + "\ncls\n"); err != nil {
+		return err
 	}
-	if _, err := waitPrompt(d, r, 0, 10*time.Second); err != nil {
-		return nil, fmt.Errorf("clearing the console: %w", err)
-	}
-	first := r.Read(d.snapshot()).Lines[0] // the bare prompt
-	if err := d.typeText(command + "\n"); err != nil {
-		return nil, err
-	}
-	// The echoed command line may wrap over several rows.
-	echo := first + " " + command
-	echoRows := (len([]rune(echo)) + r.Grid.Cols - 1) / r.Grid.Cols
-	scr, err := waitPrompt(d, r, echoRows, timeout)
-	d.debugShot("command-done")
+	_, err := waitScreen(d, r, 20*time.Second, clearedPrompt)
+	d.debugShot("helper")
 	if err != nil {
-		return trimBlank(scr.Lines), err
+		return fmt.Errorf("installing the helper: %w", err)
 	}
-	out := scr.Lines[echoRows:scr.CursorRow]
-	if !strings.HasPrefix(scr.Lines[0], first) {
-		err = errors.New("the output was longer than the console window; only its end was captured")
-		out = scr.Lines[:scr.CursorRow]
-	}
-	return trimBlank(out), err
+	return nil
 }
 
-// waitPrompt waits until the cursor sits after a prompt on row minRow or
-// below, and the screen has stopped changing.
-func waitPrompt(d *desktop, r *console.Reader, minRow int, timeout time.Duration) (console.Screen, error) {
+// clearedPrompt matches a cleared console: a bare prompt on row 0 with the
+// cursor after it, and nothing else.
+func clearedPrompt(s console.Screen) bool {
+	if s.CursorRow != 0 || !atPrompt(s) {
+		return false
+	}
+	for _, l := range s.Lines[1:] {
+		if l != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// Paging timing: how long a page may stay unreadable on screen before
+// asking for a redraw, and how long an acknowledged page may stay before
+// acknowledging it again.
+const (
+	redrawAfter = 2 * time.Second
+	reackAfter  = 2 * time.Second
+)
+
+// runPaged runs command through the helper and collects its output page by
+// page. It returns the output text and the command's status.
+func runPaged(d *desktop, r *console.Reader, command string, width int, timeout time.Duration) (string, int, error) {
+	if err := installHelper(d, r); err != nil {
+		return "", 0, err
+	}
+	id := newNonce()
+	if err := d.typeFast(console.RunLine(command, id, width) + "\n"); err != nil {
+		return "", 0, err
+	}
+	d.debugShot("run")
+	var data strings.Builder
+	next := uint32(0)
+	pages := uint32(0)
+	st := 0
 	deadline := time.Now().Add(timeout)
-	var prev string
+	var badSince, ackedAt time.Time
+	started := time.Now()
+	for {
+		if time.Now().After(deadline) {
+			d.debugShot("page-timeout")
+			return "", 0, fmt.Errorf("timed out after %v waiting for page %d", timeout, next)
+		}
+		if err := d.sleep(50 * time.Millisecond); err != nil {
+			return "", 0, err
+		}
+		scr := r.Read(d.snapshot())
+		p, ok := r.ReadPage(scr)
+		switch {
+		case ok && p.ID == id && p.Seq == next:
+			// A new page: take it and acknowledge it.
+			data.WriteString(p.Data)
+			pages, st = p.Pages, p.Status
+			next++
+			badSince = time.Time{}
+			if err := d.typeFast(console.AckKey(p.Seq)); err != nil {
+				return "", 0, err
+			}
+			ackedAt = time.Now()
+			if next == pages {
+				out, err := console.DecodeOutput(data.String())
+				if err != nil {
+					return "", 0, err
+				}
+				if _, err := waitScreen(d, r, 10*time.Second, clearedPrompt); err != nil {
+					status("helper did not return to the prompt: %v", err)
+				}
+				if pages > 1 {
+					status("received %d pages in %.1fs", pages, time.Since(started).Seconds())
+				}
+				return normalizeOutput(out), st, nil
+			}
+		case ok && p.ID == id && p.Seq == next-1 && next > 0:
+			// Still showing the page already taken: the acknowledgement
+			// may have been lost. Repeating it is harmless.
+			if time.Since(ackedAt) > reackAfter {
+				if err := d.typeFast(console.AckKey(p.Seq)); err != nil {
+					return "", 0, err
+				}
+				ackedAt = time.Now()
+			}
+		case next == 0 && atPrompt(scr) && time.Since(started) > time.Second:
+			// Back at the prompt without a page: the helper failed.
+			d.debugShot("helper-failed")
+			return strings.Join(trimBlank(scr.Lines), "\n") + "\n", 0,
+				errors.New("the helper did not start a transfer; the console shows the output above")
+		case !ok && strings.HasPrefix(firstLine(scr), "RDPCLI1 "):
+			// A page that does not check out: still being drawn, or
+			// misdrawn. Ask for a redraw if it stays that way.
+			if badSince.IsZero() {
+				badSince = time.Now()
+			} else if time.Since(badSince) > redrawAfter {
+				d.debugShot(fmt.Sprintf("bad-page-%d", next))
+				if err := d.typeFast("r"); err != nil {
+					return "", 0, err
+				}
+				badSince = time.Time{}
+			}
+		}
+	}
+}
+
+// atPrompt reports whether the cursor sits after a PowerShell prompt.
+func atPrompt(s console.Screen) bool {
+	if s.CursorRow < 0 {
+		return false
+	}
+	line := s.Lines[s.CursorRow]
+	return s.CursorCol == len([]rune(line))+1 && promptRE.MatchString(line)
+}
+
+func firstLine(s console.Screen) string {
+	if len(s.Lines) == 0 {
+		return ""
+	}
+	return s.Lines[0]
+}
+
+// normalizeOutput converts CRLF to LF and drops the blank line Out-String
+// ends with.
+func normalizeOutput(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.TrimSuffix(s, "\n")
+	if s != "" && !strings.HasSuffix(s, "\n") {
+		s += "\n"
+	}
+	return s
+}
+
+// terminalWidth is stdout's terminal width, or 120 when it is not a
+// terminal.
+func terminalWidth() int {
+	if w, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w > 0 {
+		return w
+	}
+	return 120
+}
+
+// waitScreen waits until the console matches want on two reads in a row.
+func waitScreen(d *desktop, r *console.Reader, timeout time.Duration, want func(console.Screen) bool) (console.Screen, error) {
+	deadline := time.Now().Add(timeout)
 	var scr console.Screen
+	matched := false
 	for time.Now().Before(deadline) {
-		if err := d.sleep(150 * time.Millisecond); err != nil {
+		if err := d.sleep(100 * time.Millisecond); err != nil {
 			return scr, err
 		}
 		scr = r.Read(d.snapshot())
-		cur := strings.Join(scr.Lines, "\n")
-		if scr.CursorRow >= minRow && scr.CursorRow >= 0 {
-			line := scr.Lines[scr.CursorRow]
-			// Scrolling can leave the window short of the bottom row, so
-			// only the cursor's row is checked.
-			if scr.CursorCol == len([]rune(line))+1 && promptRE.MatchString(line) && cur == prev {
+		if want(scr) {
+			if matched {
 				return scr, nil
 			}
+			matched = true
+		} else {
+			matched = false
 		}
-		prev = cur
 	}
-	return scr, errors.New("timed out waiting for the PowerShell prompt")
+	return scr, errors.New("timed out waiting for the console")
 }
 
 func trimBlank(lines []string) []string {

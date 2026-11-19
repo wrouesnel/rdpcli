@@ -54,9 +54,20 @@ person at the keyboard:
    like in the console's font, so no font data is built in and any font or
    size works. RDP does not antialias text unless the client asks, so cells
    arrive exactly and are matched exactly.
-3. Once that console is seen, rdpcli maximises it, calibrates again, types
-   the command, waits for the prompt to come back, and prints the text
-   between the command and the prompt.
+3. Once that console is seen, rdpcli maximises it, calibrates again and
+   types in a small helper function.
+4. The command goes to the helper base64-encoded (so no quoting can break
+   it). The helper runs it, captures every output stream, gzips the text and
+   shows it as pages of base64: a header row (transfer id, page number, page
+   count, length, SHA-256 prefix, status) and data rows. rdpcli reads each
+   page, checks it, and types the page's acknowledgement key; only then does
+   the helper show the next page. Output never scrolls past unread, and a
+   page that doesn't check out (still being drawn) is waited for or redrawn.
+   The output is printed exactly, in any language.
+
+The exit code is the command's: `$LASTEXITCODE` of a failing native program,
+1 if PowerShell reported an error, otherwise 0. Output is formatted for the
+local terminal's width (`--output-width` to change).
 
 Nothing is typed until the console has been seen on screen (the calibration
 rows carry a random nonce, so an old console can't be mistaken for the new
@@ -65,11 +76,12 @@ notice, a password change), `console` starts the browser viewer, prints its
 URL and asks you to sort out the desktop there, then press Continue.
 `--no-interactive` makes it fail instead, for scripts.
 
-Current limits: output is read from the visible window, so only the last
-window's worth of a long output is returned (with an error saying so); text
-outside printable ASCII reads as U+FFFD; a run takes about 12 s, mostly
-waiting for windows to appear. A paged transfer that never loses scrolled
-output is the next step.
+Throughput is roughly 20–40 KB of text a second (12 pages of incompressible
+text, 96 KB, in 2.7 s); a run takes about 12 s more, mostly waiting for
+windows to appear. Current limits: output arrives once the command has
+finished, not while it runs; the command cannot read input; and if rdpcli
+gives up (`--command-timeout`), the command keeps running on the server until
+it ends, after which the console closes.
 
 ## Viewer
 
@@ -129,6 +141,9 @@ fingerprint is printed on connect) or skip verification with `--tls-insecure`.
 - **Input right after connecting:** Windows ignores keystrokes for a moment
   after a client connects, while it switches the session over to the new
   connection. `console` waits for the screen to stop changing before it types.
+- **Input bursts:** a single Input PDU carrying a long string (120
+  characters, 240 Unicode key events) reached conhost with characters lost
+  and reordered; 24 characters per PDU, 10 ms apart, arrive intact.
 - **Unicode keys and PSReadLine:** PSReadLine (loaded by default in
   PowerShell 5.1) ignores Unicode key events (VK_PACKET), so text typed that
   way never reaches the prompt. Without PSReadLine, conhost takes them.

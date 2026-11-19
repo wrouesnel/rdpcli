@@ -97,6 +97,24 @@ func (d *desktop) typeText(s string) error {
 	return nil
 }
 
+// typeFast types s in larger chunks, for a console, which keeps up.
+func (d *desktop) typeFast(s string) error {
+	runes := []rune(s)
+	for len(runes) > 0 {
+		n := min(len(runes), 24)
+		if err := d.s.conn.SendInput(rdp.TextEvents(string(runes[:n]))...); err != nil {
+			return err
+		}
+		runes = runes[n:]
+		if len(runes) > 0 {
+			if err := d.sleep(10 * time.Millisecond); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // chord presses keys in order and releases them in reverse, e.g. Win+R.
 func (d *desktop) chord(keys ...rdp.Scancode) error {
 	var evs []rdp.InputEvent
