@@ -8,6 +8,7 @@ import (
 	"image/png"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -22,6 +23,7 @@ commands:
   screenshot HOST[:PORT]   log on and save the remote desktop as a PNG
   view HOST[:PORT]         show and control the remote desktop in a local browser page
   console HOST[:PORT]      open a PowerShell console, run a command, print what it shows
+  version                  print rdpcli's version
 
 Run "rdpcli <command> -h" for command options.
 `
@@ -41,12 +43,51 @@ func main() {
 		os.Exit(cmdView(args))
 	case "console":
 		os.Exit(cmdConsole(args))
+	case "version", "--version":
+		fmt.Println("rdpcli", buildVersion())
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
 		fmt.Fprintf(os.Stderr, "rdpcli: unknown command %q\n\n%s", os.Args[1], usage)
 		os.Exit(2)
 	}
+}
+
+// version is set by release builds (-ldflags "-X main.version=v1.2.3").
+var version = ""
+
+// buildVersion is the release version, or what the Go toolchain recorded
+// for other builds: the module version for "go install", else the commit.
+func buildVersion() string {
+	if version != "" {
+		return version
+	}
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	if v := bi.Main.Version; v != "" && v != "(devel)" {
+		return v
+	}
+	rev, dirty := "", false
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if rev == "" {
+		return "devel"
+	}
+	if len(rev) > 12 {
+		rev = rev[:12]
+	}
+	if dirty {
+		rev += "-dirty"
+	}
+	return "devel-" + rev
 }
 
 func cmdConnect(args []string) int {

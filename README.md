@@ -11,11 +11,28 @@ mouse), and run PowerShell in a console it opens on the remote desktop:
 either a single command, its output read back off the screen, or an
 interactive terminal session connected to the local terminal.
 
-## Build
+## Install
+
+Release archives for Linux, macOS, Windows and FreeBSD are on the GitHub
+releases page, each with a single statically linked binary; `SHA256SUMS`
+lists their checksums. Or build from source:
 
 ```sh
 CGO_ENABLED=0 go build -o bin/rdpcli ./cmd/rdpcli
+go install github.com/wrouesnel/rdpcli/cmd/rdpcli@latest
 ```
+
+`rdpcli version` prints the version.
+
+## Releases
+
+CI (`.github/workflows/ci.yml`) checks formatting, vets and tests on Linux,
+macOS and Windows, and builds every release archive. Pushing a `v*` tag runs
+`.github/workflows/release.yml`, which tests the tagged commit, builds the
+archives with `scripts/build-release.sh` and publishes a GitHub release with
+generated notes; a tag with a hyphen (`v1.0.0-rc.1`) makes a pre-release.
+The script runs locally too (`scripts/build-release.sh v1.2.3` writes
+`dist/`), and its builds are reproducible.
 
 ## Usage
 
