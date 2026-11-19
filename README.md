@@ -14,7 +14,7 @@ interactive terminal session connected to the local terminal.
 ## Install
 
 Release archives for Linux, macOS, Windows and FreeBSD are on the GitHub
-releases page, each with a single statically linked binary; `SHA256SUMS`
+releases page, each with a single statically linked binary (plus the README and licence); `SHA256SUMS`
 lists their checksums. Or build from source:
 
 ```sh
@@ -230,3 +230,7 @@ printf '%s\n' "$RDPCLI_VM_PASSWORD" | \
 printf '%s\n' "$RDPCLI_VM_PASSWORD" | \
   xvfb-run -a xfreerdp3 /v:127.0.0.1 /u:rdpadmin /admin /cert:ignore /from-stdin:force
 ```
+
+## License
+
+MIT; see [LICENSE](LICENSE).

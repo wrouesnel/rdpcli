@@ -3,8 +3,8 @@
 #
 #   scripts/build-release.sh v1.2.3
 #
-# Each archive holds a statically linked rdpcli binary (CGO disabled) and
-# the README; dist/SHA256SUMS lists their checksums. Builds are
+# Each archive holds a statically linked rdpcli binary (CGO disabled), the
+# README and the licence; dist/SHA256SUMS lists their checksums. Builds are
 # reproducible: -trimpath, no build ID, and archive timestamps and owners
 # fixed to the commit's.
 set -euo pipefail
@@ -32,7 +32,7 @@ for t in "${targets[@]}"; do
 	echo "building $name" >&2
 	CGO_ENABLED=0 GOOS=$os GOARCH=$arch GOARM=7 go build -trimpath -buildvcs=false \
 		-ldflags "-s -w -buildid= -X main.version=$version" -o "$stage/$exe" ./cmd/rdpcli
-	cp README.md "$stage/"
+	cp README.md LICENSE "$stage/"
 	touch -d "$mtime" "$stage" "$stage"/*
 	if [[ $os == windows ]]; then
 		(cd dist && find "$name" -print | sort | TZ=UTC zip -qX -@ "$name.zip")
