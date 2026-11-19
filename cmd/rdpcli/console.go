@@ -39,6 +39,7 @@ func cmdConsole(args []string) int {
 	f := newConnFlags("console", "console HOST[:PORT] -u USER [-c COMMAND] [options]")
 	command := f.fs.String("c", "", "PowerShell command to run; its output is printed and its status is the exit code")
 	width := f.fs.Int("output-width", 0, "format output for this many columns (default: this terminal's width, or 120)")
+	tty := f.fs.Bool("t", false, "interactive: run PowerShell (or -c's command) in a pseudo console connected to this terminal; Ctrl+] detaches")
 	keep := f.fs.Bool("keep", false, "leave the console window open on the remote desktop")
 	cmdTimeout := f.fs.Duration("command-timeout", time.Minute, "time limit for the command to finish")
 	noInteractive := f.fs.Bool("no-interactive", false, "never ask for help in the browser viewer; fail instead (for scripts)")
@@ -127,7 +128,22 @@ func cmdConsole(args []string) int {
 	status("console ready: %dx%d cells of %dx%d px", g.Cols, g.Rows, g.CellW, g.CellH)
 
 	code := 0
-	if *command != "" {
+	if *tty {
+		st, err := runTTY(d, r, ttyCommandLine(*command), *width)
+		switch {
+		case errors.Is(err, errDetached):
+			status("detached")
+			code = 1
+		case err != nil:
+			status("%v", err)
+			code = 1
+		case st != 0:
+			code = st & 0xFF
+			if code == 0 {
+				code = 1
+			}
+		}
+	} else if *command != "" {
 		w := *width
 		if w <= 0 {
 			w = terminalWidth()

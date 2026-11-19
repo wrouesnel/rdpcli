@@ -7,8 +7,9 @@ standard virtual channels. It is also a vehicle for exploring the protocol.
 
 Status: early. rdpcli can log on to an RDP session, save a screenshot of the
 desktop, show and control the desktop from a local browser page (keyboard and
-mouse), and run a PowerShell command in a console it opens on the remote
-desktop, reading the output back off the screen.
+mouse), and run PowerShell in a console it opens on the remote desktop:
+either a single command, its output read back off the screen, or an
+interactive terminal session connected to the local terminal.
 
 ## Build
 
@@ -37,6 +38,7 @@ rdpcli view rdp.example.com -u alice --view-only --tls-sha256 <fingerprint>
 ```sh
 rdpcli console rdp.example.com -u alice -c 'Get-Service | Where Status -eq Running' --tls-sha256 <fingerprint>
 rdpcli console rdp.example.com -u alice --no-interactive -c 'hostname' ...   # in scripts
+rdpcli console rdp.example.com -u alice -t ...                # interactive PowerShell in this terminal
 ```
 
 `console` needs nothing on the server beyond an RDP logon: no WinRM, no
@@ -83,6 +85,36 @@ finished, not while it runs; the command cannot read input; and if rdpcli
 gives up (`--command-timeout`), the command keeps running on the server until
 it ends, after which the console closes.
 
+### Interactive terminal (`-t`)
+
+With `-t`, rdpcli runs `powershell.exe` (or, with `-c`, PowerShell running
+that command) in a Windows pseudo console (ConPTY) on the remote side and
+connects it to the local terminal, like `ssh -t`: full-screen programs,
+colour, PSReadLine editing and tab completion, Ctrl+C, and terminal resizes
+all work. Ctrl+] detaches. The exit code is the program's.
+
+Instead of the paging function, rdpcli types in a small C# helper (gzipped,
+compiled by Windows PowerShell's `Add-Type`, about 3 s) that owns the pseudo
+console. Both directions go over the console window:
+
+- **Output:** the helper shows the program's raw terminal output a page at a
+  time, base64 (deflated when that carries more), with a header that holds
+  the page number, the count of input frames applied, the program's state
+  and a SHA-256 prefix over all of it. A page stays put until rdpcli types
+  its acknowledgement, so nothing is skipped however fast the program
+  writes.
+- **Input:** keys typed locally go as checksummed, numbered frames
+  (base64 bytes, or a new window size) typed into the console window; the
+  helper applies each frame once and reports the count in the next header,
+  and rdpcli sends a frame again if it does not see it counted.
+
+rdpcli types a keepalive every 15 s while idle; if the helper hears nothing
+for 60 s (rdpcli was killed, the network went), it ends the program and
+closes its console rather than leave it on the desktop. Typed characters
+echo in about 0.1–0.5 s; 3000 lines of output arrive in under 2 s. ConPTY
+needs Windows 10 1809 / Server 2019 or later. `--command-timeout` does not
+apply to `-t`.
+
 ## Viewer
 
 The viewer listens on 127.0.0.1 only (change with `--listen`), and its URL
@@ -122,6 +154,7 @@ fingerprint is printed on connect) or skip verification with `--tls-insecure`.
 | Interleaved RLE bitmap codec | MS-RDPBCGR 2.2.9.1.1.3.1.2.4 | 15/16/24 bpp; the session runs at 16 bpp |
 | Keyboard and mouse input | MS-RDPBCGR 2.2.8.1.1.3 | slow-path Input PDUs: scancode, Unicode, mouse, extended buttons, wheel, sync |
 | Console text reading | | calibrated glyph matching on conhost; see "Console" above |
+| Interactive terminal | | ConPTY behind a C# helper, paged over the console window; see "Interactive terminal" |
 
 ## Protocol notes
 
@@ -147,6 +180,10 @@ fingerprint is printed on connect) or skip verification with `--tls-insecure`.
 - **Unicode keys and PSReadLine:** PSReadLine (loaded by default in
   PowerShell 5.1) ignores Unicode key events (VK_PACKET), so text typed that
   way never reaches the prompt. Without PSReadLine, conhost takes them.
+- **ConPTY terminal modes:** the pseudo console turns on focus reporting
+  and win32-input-mode (`?1004h`, `?9001h`) on the terminal when it starts
+  and turns them off only when the program exits normally; on a detach
+  rdpcli turns them off itself.
 - **Open question:** one early run was rejected after Confirm Active with
   `ERRINFO_BAD_CAPABILITIES` (0x10EA) and has not reproduced since, with the
   same capability sets.
