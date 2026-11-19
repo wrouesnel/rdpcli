@@ -8,6 +8,7 @@
 # reproducible: -trimpath, no build ID, and archive timestamps and owners
 # fixed to the commit's.
 set -euo pipefail
+umask 022 # file modes are part of the archives; fix them for reproducibility
 
 version=${1:?usage: $0 VERSION}
 targets=(
