@@ -49,7 +49,11 @@ import (
 // forever.
 
 //go:embed pty.cs
-var ptySource string
+var ptyFile string
+
+// ptySource is the helper's source with LF line endings, so its hash (and
+// the class name) is the same whatever line endings the checkout used.
+var ptySource = strings.ReplaceAll(ptyFile, "\r\n", "\n")
 
 // PtyClass is the helper's class name: it carries a hash of the source, so
 // a console kept open from another build never runs a different helper.

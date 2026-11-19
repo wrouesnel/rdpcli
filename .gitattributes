@@ -1,0 +1,4 @@
+# Keep LF line endings on every platform: the embedded C# helper is hashed
+# for its class name, and shell scripts must run unchanged.
+* text=auto eol=lf
+*.png binary
